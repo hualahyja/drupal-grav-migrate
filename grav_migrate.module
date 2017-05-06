@@ -1,0 +1,213 @@
+<?php
+
+use Symfony\Component\Yaml\Yaml;
+use League\HTMLToMarkdown\HtmlConverter;
+
+
+function grav_migrate_menu() {
+  return [
+    'grav-migrate' => [
+      'title' => 'Migrate',
+      'page callback' => 'grav_migrate_page_for_it',
+      'access callback' => TRUE,
+    ]
+  ];
+}
+
+function grav_migrate_page_for_it() {
+  $nids = get_nodes();
+
+  $nodes = node_load_multiple($nids);
+
+  foreach ($nodes as $node) {
+    process_node($node);
+  }
+
+  $str = "---
+---
+title: xoc.dk
+blog_url: blog
+body_classes: header-image fullwidth
+
+sitemap:
+    changefreq: monthly
+    priority: 1.03
+
+content:
+    items: @self.children
+    order:
+        by: date
+        dir: desc
+    limit: 5
+    pagination: true
+
+feed:
+    description: Camillog
+    limit: 10
+
+pagination: true
+---
+
+## **Camillog**
+---\n";
+  $dir = 'private://01.blog';
+  file_prepare_directory($dir, FILE_CREATE_DIRECTORY | FILE_MODIFY_PERMISSIONS);
+  file_unmanaged_save_data($str, $dir . '/blog.md', FILE_EXISTS_REPLACE);
+  drupal_add_http_header('grav-migrate', 'OK');
+  return 'ohai';
+}
+
+function process_node($node) {
+  $date = new \DateObject($node->created);
+  $yaml = [
+    'title' => $node->title,
+    'date' => $date->format('d-m-Y h:i'),
+    'routes' => [
+      'default' => '/' . drupal_get_path_alias('node/'. $node->nid),
+    ]
+  ];
+  $category = getTermNames($node->taxonomy_vocabulary_1);
+  if (!empty($category)) {
+    $yaml['taxonomy']['category'] = $category;
+  }
+  $tags = getTermNames($node->taxonomy_vocabulary_2);
+  if (!empty($tags)) {
+    $yaml['taxonomy']['tag'] = $tags;
+  }
+  $file = "---\n";
+  $file .= Yaml::dump($yaml);
+  $file .= "\n---\n";
+
+  $converter = new HtmlConverter();
+  $body = '';
+  if (!empty($node->body[LANGUAGE_NONE][0]['safe_value'])) {
+    $body = $node->body[LANGUAGE_NONE][0]['safe_value'];
+  }
+  elseif (!empty($node->body['da'][0]['safe_value'])) {
+    $body = $node->body['da'][0]['safe_value'];
+  }
+
+  if (!empty($node->body[LANGUAGE_NONE][0]['safe_summary'])) {
+    $summary = $node->body[LANGUAGE_NONE][0]['safe_summary'];
+  }
+  elseif (!empty($node->body['da'][0]['safe_summary'])) {
+    $summary = $node->body['da'][0]['safe_summary'];
+  }
+  else {
+    $summary = $body;
+  }
+  $file .= "\n" . $converter->convert($summary) . "\n\n===\n\n";
+  $file .= loFiFilter($converter->convert($body));
+
+  // Comments.
+  if (2 == $node->comment) {
+    $comments = getComments($node);
+    if (!empty($comments)) {
+      $file .= $comments;
+    }
+  }
+
+  $dir = 'private://01.blog/' . $node->nid;
+  file_prepare_directory($dir, FILE_CREATE_DIRECTORY | FILE_MODIFY_PERMISSIONS);
+  file_unmanaged_save_data($file, $dir . '/item.md', FILE_EXISTS_REPLACE);
+}
+
+function getTermNames($field) {
+  if (empty($field[LANGUAGE_NONE][0])) {
+    return [];
+  }
+  $terms = [];
+  foreach ($field[LANGUAGE_NONE] as $item) {
+    $term = taxonomy_term_load($item['tid']);
+    if (!empty($term->name)) {
+      $terms[] = $term->name;
+    }
+  }
+  return $terms;
+}
+
+function getComments($node) {
+
+  $comments = comment_node_page_additions($node);
+  $elements = element_children($comments['comments']);
+  if (!empty($elements['pager'])) {
+    unset($elements['pager']);
+  }
+  $md = [];
+  foreach ($elements as $cid) {
+    $comment = render($comments['comments'][$cid]);
+    if (!empty($comment)) {
+      $md[] = '<li>' . trim($comment) . '</li>';
+    }
+  }
+  if (empty($md)) {
+    return "\n";
+  }
+  $rendered = '<ul>' . implode("\n", $md) . '</ul>';
+  $rendered = preg_replace(['@<a id="comment-[0-9]+"></a>@', '@<div class="mollom-flag-content mollom-flag-content-comment">@'], ['', ''], $rendered);
+  return "\n<article>\n<h1>Kommentarer </h1>\n{$rendered}\n</article>\n";
+}
+
+function loFiFilter($text) {
+  return str_replace(
+    [
+      '/files/xoc.dk/images',
+      '/files/xoc.dk',
+    ],
+    [
+      '/images',
+      '/',
+    ],
+    $text
+  );
+}
+
+function get_nodes() {
+  $query = db_select('node', 'n');
+
+  $query->fields('n', array('nid'))
+    ->condition('n.type', 'blog')
+    ->condition('n.status', '1');
+  $result = $query->execute();
+
+  $nids = [];
+  foreach ($result as $record) {
+    $nids[] = $record->nid;
+  }
+  return $nids;
+}
+
+/**
+ * Implements hook_boot().
+ */
+function grav_migrate_boot() {
+  try {
+    grav_migrate_register_autoloader();
+  }
+  catch (\RuntimeException $e) {
+    if (!drupal_is_cli()) {
+      watchdog_exception('grav_migrate', $e);
+    }
+  }
+}
+
+/**
+ * Registers the autoloader for all third-party packages.
+ *
+ * @return \Composer\Autoload\ClassLoader
+ *   The ClassLoader instance.
+ */
+function grav_migrate_register_autoloader() {
+  static $registered = FALSE;
+  $autoloader = 'sites/all/modules/grav_migrate/vendor/autoload.php';
+
+  if (!$registered) {
+    if (!file_exists($autoloader)) {
+      $message = t('Autoloader not found: @file', array('@file' => $autoloader));
+      throw new \RuntimeException($message);
+    }
+    $registered = TRUE;
+  }
+
+  return require $autoloader;
+}

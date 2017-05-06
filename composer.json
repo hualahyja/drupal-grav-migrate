@@ -1,0 +1,6 @@
+{
+    "require": {
+        "symfony/yaml": "^3.2",
+        "league/html-to-markdown": "^4.3"
+    }
+}
